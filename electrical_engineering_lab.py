@@ -251,6 +251,86 @@ class EquipmentCostAnalyzer:
         return ht_motor_price, lt_system_capital, lt_total_annual_cost
 
 
+class GeneratorStationPFCalculator:
+    """Solver for Generator Station Power Factor Problem"""
+
+    @staticmethod
+    def calculate_rotary_converter_pf(lighting_kw, motor_hp, motor_pf, motor_eff,
+                                     converter_v, converter_i, converter_eff):
+        """
+        Calculate the required power factor of the rotary converter
+        for unity power factor at the supply station
+
+        Problem: A generator station supplies power to:
+        - Lighting load
+        - Induction motor with given HP, PF, efficiency
+        - Rotary converter with given voltage, current, efficiency
+
+        Find the PF of rotary converter needed for unity PF at station
+        """
+        # Convert motor HP to kW
+        motor_output_kw = motor_hp * 0.746
+
+        # Lighting load (assumed unity power factor)
+        P_lighting = lighting_kw
+        Q_lighting = 0  # No reactive power for lighting
+
+        # Induction motor calculations
+        P_motor_output = motor_output_kw
+        P_motor_input = P_motor_output / motor_eff
+
+        # Apparent power of motor
+        S_motor = P_motor_input / motor_pf
+
+        # Reactive power of motor (lagging)
+        phi_motor = math.acos(motor_pf)
+        Q_motor = S_motor * math.sin(phi_motor)
+
+        # Rotary converter calculations
+        P_converter_output = (converter_v * converter_i) / 1000  # in kW
+        P_converter_input = P_converter_output / converter_eff
+
+        # Total real power
+        P_total = P_lighting + P_motor_input + P_converter_input
+
+        # For unity power factor at station: Total Q must be zero
+        # Q_total = Q_lighting + Q_motor + Q_converter = 0
+        # Therefore: Q_converter = -(Q_lighting + Q_motor)
+        Q_converter = -(Q_lighting + Q_motor)
+
+        # Apparent power of converter
+        S_converter = math.sqrt(P_converter_input**2 + Q_converter**2)
+
+        # Power factor of converter
+        pf_converter = P_converter_input / S_converter
+
+        # Determine if leading or lagging
+        if Q_converter < 0:
+            pf_type = "leading"
+        elif Q_converter > 0:
+            pf_type = "lagging"
+        else:
+            pf_type = "unity"
+
+        return {
+            'P_lighting': P_lighting,
+            'Q_lighting': Q_lighting,
+            'P_motor_output': P_motor_output,
+            'P_motor_input': P_motor_input,
+            'S_motor': S_motor,
+            'Q_motor': Q_motor,
+            'P_converter_output': P_converter_output,
+            'P_converter_input': P_converter_input,
+            'Q_converter': Q_converter,
+            'S_converter': S_converter,
+            'P_total': P_total,
+            'Q_total': 0,
+            'pf_converter': pf_converter,
+            'pf_type': pf_type,
+            'motor_output_kw': motor_output_kw
+        }
+
+
 class ElectricalEngineeringLab(tk.Tk):
     """Main application window"""
 
@@ -276,6 +356,7 @@ class ElectricalEngineeringLab(tk.Tk):
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # Create tabs
+        self.create_generator_pf_tab()
         self.create_tariff_tab()
         self.create_equipment_tab()
         self.create_dc_motor_tab()
@@ -308,6 +389,358 @@ class ElectricalEngineeringLab(tk.Tk):
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About", command=self.show_about)
+
+    def create_generator_pf_tab(self):
+        """Generator Station Power Factor Calculator"""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="★ Generator PF Problem")
+
+        # Main container with grid
+        main_frame = ttk.Frame(tab, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(0, weight=1)
+
+        # Problem statement
+        problem_frame = ttk.LabelFrame(main_frame, text="Problem Statement", padding="10")
+        problem_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        problem_text = """
+A generator station supplies power to the following loads:
+  • Lighting load
+  • Induction motor with specified HP, power factor, and efficiency
+  • Rotary converter with specified voltage, current, and efficiency
+
+OBJECTIVE: Find the power factor of the rotary converter needed to achieve
+           unity power factor at the generator station.
+"""
+        ttk.Label(problem_frame, text=problem_text, justify=tk.LEFT, font=("Arial", 10)).pack()
+
+        # Input section
+        input_frame = ttk.LabelFrame(main_frame, text="Input Parameters", padding="10")
+        input_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5, padx=(0, 5))
+
+        # Lighting load
+        ttk.Label(input_frame, text="LIGHTING LOAD", font=("Arial", 10, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky=tk.W, pady=(5, 2))
+        ttk.Label(input_frame, text="Lighting Power (kW):").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.gen_lighting_kw = tk.DoubleVar(value=100)
+        ttk.Entry(input_frame, textvariable=self.gen_lighting_kw, width=15).grid(row=1, column=1, pady=2)
+        ttk.Scale(input_frame, from_=0, to=500, variable=self.gen_lighting_kw,
+                 orient=tk.HORIZONTAL, length=200).grid(row=1, column=2, pady=2, padx=5)
+
+        # Induction motor
+        ttk.Label(input_frame, text="INDUCTION MOTOR", font=("Arial", 10, "bold")).grid(
+            row=2, column=0, columnspan=3, sticky=tk.W, pady=(10, 2))
+
+        ttk.Label(input_frame, text="Motor Power (HP):").grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.gen_motor_hp = tk.DoubleVar(value=400)
+        ttk.Entry(input_frame, textvariable=self.gen_motor_hp, width=15).grid(row=3, column=1, pady=2)
+        ttk.Scale(input_frame, from_=0, to=1000, variable=self.gen_motor_hp,
+                 orient=tk.HORIZONTAL, length=200).grid(row=3, column=2, pady=2, padx=5)
+
+        ttk.Label(input_frame, text="Motor Power Factor:").grid(row=4, column=0, sticky=tk.W, pady=2)
+        self.gen_motor_pf = tk.DoubleVar(value=0.8)
+        ttk.Entry(input_frame, textvariable=self.gen_motor_pf, width=15).grid(row=4, column=1, pady=2)
+        ttk.Scale(input_frame, from_=0.5, to=1.0, variable=self.gen_motor_pf,
+                 orient=tk.HORIZONTAL, length=200).grid(row=4, column=2, pady=2, padx=5)
+
+        ttk.Label(input_frame, text="Motor Efficiency:").grid(row=5, column=0, sticky=tk.W, pady=2)
+        self.gen_motor_eff = tk.DoubleVar(value=0.92)
+        ttk.Entry(input_frame, textvariable=self.gen_motor_eff, width=15).grid(row=5, column=1, pady=2)
+        ttk.Scale(input_frame, from_=0.7, to=1.0, variable=self.gen_motor_eff,
+                 orient=tk.HORIZONTAL, length=200).grid(row=5, column=2, pady=2, padx=5)
+
+        # Rotary converter
+        ttk.Label(input_frame, text="ROTARY CONVERTER", font=("Arial", 10, "bold")).grid(
+            row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 2))
+
+        ttk.Label(input_frame, text="Converter Voltage (V):").grid(row=7, column=0, sticky=tk.W, pady=2)
+        self.gen_conv_v = tk.DoubleVar(value=800)
+        ttk.Entry(input_frame, textvariable=self.gen_conv_v, width=15).grid(row=7, column=1, pady=2)
+        ttk.Scale(input_frame, from_=0, to=1500, variable=self.gen_conv_v,
+                 orient=tk.HORIZONTAL, length=200).grid(row=7, column=2, pady=2, padx=5)
+
+        ttk.Label(input_frame, text="Converter Current (A):").grid(row=8, column=0, sticky=tk.W, pady=2)
+        self.gen_conv_i = tk.DoubleVar(value=100)
+        ttk.Entry(input_frame, textvariable=self.gen_conv_i, width=15).grid(row=8, column=1, pady=2)
+        ttk.Scale(input_frame, from_=0, to=500, variable=self.gen_conv_i,
+                 orient=tk.HORIZONTAL, length=200).grid(row=8, column=2, pady=2, padx=5)
+
+        ttk.Label(input_frame, text="Converter Efficiency:").grid(row=9, column=0, sticky=tk.W, pady=2)
+        self.gen_conv_eff = tk.DoubleVar(value=0.94)
+        ttk.Entry(input_frame, textvariable=self.gen_conv_eff, width=15).grid(row=9, column=1, pady=2)
+        ttk.Scale(input_frame, from_=0.7, to=1.0, variable=self.gen_conv_eff,
+                 orient=tk.HORIZONTAL, length=200).grid(row=9, column=2, pady=2, padx=5)
+
+        # Calculate button
+        ttk.Button(input_frame, text="⚡ CALCULATE REQUIRED POWER FACTOR ⚡",
+                  command=self.calculate_generator_pf,
+                  style="Accent.TButton").grid(row=10, column=0, columnspan=3, pady=15)
+
+        # Results section
+        result_frame = ttk.LabelFrame(main_frame, text="Detailed Solution & Results", padding="10")
+        result_frame.grid(row=1, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5, padx=(5, 0))
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(1, weight=1)
+
+        self.gen_pf_result = scrolledtext.ScrolledText(result_frame, height=25, width=70,
+                                                       wrap=tk.WORD, font=("Courier", 9))
+        self.gen_pf_result.pack(fill=tk.BOTH, expand=True)
+
+        # Visualization section
+        viz_frame = ttk.LabelFrame(main_frame, text="Power Triangle Diagrams", padding="10")
+        viz_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        main_frame.rowconfigure(2, weight=1)
+
+        self.gen_pf_fig = Figure(figsize=(12, 4), dpi=90)
+        self.gen_pf_canvas = FigureCanvasTkAgg(self.gen_pf_fig, master=viz_frame)
+        self.gen_pf_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def calculate_generator_pf(self):
+        """Calculate required rotary converter power factor"""
+        try:
+            lighting_kw = self.gen_lighting_kw.get()
+            motor_hp = self.gen_motor_hp.get()
+            motor_pf = self.gen_motor_pf.get()
+            motor_eff = self.gen_motor_eff.get()
+            converter_v = self.gen_conv_v.get()
+            converter_i = self.gen_conv_i.get()
+            converter_eff = self.gen_conv_eff.get()
+
+            # Calculate
+            calc = GeneratorStationPFCalculator()
+            results = calc.calculate_rotary_converter_pf(
+                lighting_kw, motor_hp, motor_pf, motor_eff,
+                converter_v, converter_i, converter_eff
+            )
+
+            # Display detailed results
+            result_text = f"""
+╔═══════════════════════════════════════════════════════════════════╗
+║       GENERATOR STATION POWER FACTOR CALCULATION                  ║
+║       Required Rotary Converter Power Factor for Unity PF         ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+GIVEN DATA:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. LIGHTING LOAD:
+   • Power: {lighting_kw:.2f} kW (assumed at unity power factor)
+
+2. INDUCTION MOTOR:
+   • Rating: {motor_hp:.2f} HP = {results['motor_output_kw']:.2f} kW
+   • Power Factor: {motor_pf:.2f} (lagging)
+   • Efficiency: {motor_eff*100:.2f}%
+
+3. ROTARY CONVERTER:
+   • Voltage: {converter_v:.2f} V
+   • Current: {converter_i:.2f} A
+   • Efficiency: {converter_eff*100:.2f}%
+   • Output Power: {results['P_converter_output']:.2f} kW
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP-BY-STEP SOLUTION:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1: Lighting Load Analysis
+────────────────────────────────
+   Real Power (P₁)      = {results['P_lighting']:.4f} kW
+   Reactive Power (Q₁)  = {results['Q_lighting']:.4f} kVAR (unity PF)
+
+STEP 2: Induction Motor Analysis
+────────────────────────────────
+   Motor Output         = {results['P_motor_output']:.4f} kW
+   Motor Input (P₂)     = Output / Efficiency
+                        = {results['P_motor_output']:.4f} / {motor_eff:.4f}
+                        = {results['P_motor_input']:.4f} kW
+
+   Apparent Power (S₂)  = P₂ / Power Factor
+                        = {results['P_motor_input']:.4f} / {motor_pf:.4f}
+                        = {results['S_motor']:.4f} kVA
+
+   Power Angle (φ₂)     = arccos({motor_pf:.4f})
+                        = {math.degrees(math.acos(motor_pf)):.2f}°
+
+   Reactive Power (Q₂)  = S₂ × sin(φ₂)
+                        = {results['S_motor']:.4f} × {math.sin(math.acos(motor_pf)):.4f}
+                        = {results['Q_motor']:.4f} kVAR (lagging)
+
+STEP 3: Rotary Converter Analysis
+────────────────────────────────
+   Converter Output     = V × I / 1000
+                        = {converter_v:.2f} × {converter_i:.2f} / 1000
+                        = {results['P_converter_output']:.4f} kW
+
+   Converter Input (P₃) = Output / Efficiency
+                        = {results['P_converter_output']:.4f} / {converter_eff:.4f}
+                        = {results['P_converter_input']:.4f} kW
+
+STEP 4: Unity Power Factor Requirement
+────────────────────────────────────────
+   For unity PF at station: Total Reactive Power = 0
+
+   Q_total = Q₁ + Q₂ + Q₃ = 0
+
+   Q₃ = -(Q₁ + Q₂)
+      = -({results['Q_lighting']:.4f} + {results['Q_motor']:.4f})
+      = {results['Q_converter']:.4f} kVAR ({results['pf_type']})
+
+STEP 5: Converter Power Factor Calculation
+────────────────────────────────────────────
+   Apparent Power (S₃)  = √(P₃² + Q₃²)
+                        = √({results['P_converter_input']:.4f}² + {results['Q_converter']:.4f}²)
+                        = {results['S_converter']:.4f} kVA
+
+   Power Factor (PF₃)   = P₃ / S₃
+                        = {results['P_converter_input']:.4f} / {results['S_converter']:.4f}
+                        = {results['pf_converter']:.6f} ({results['pf_type']})
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FINAL ANSWER:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+   ★ REQUIRED POWER FACTOR OF ROTARY CONVERTER: {results['pf_converter']:.4f} ({results['pf_type']})
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+VERIFICATION:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Total Real Power:        P_total = {results['P_total']:.4f} kW
+Total Reactive Power:    Q_total = {results['Q_total']:.4f} kVAR
+Total Apparent Power:    S_total = {results['P_total']:.4f} kVA
+Station Power Factor:    PF_station = 1.0000 (Unity) ✓
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SUMMARY TABLE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Load              │  Real P (kW) │ Reactive Q (kVAR) │ Apparent S (kVA)
+──────────────────┼──────────────┼───────────────────┼─────────────────
+Lighting          │  {results['P_lighting']:>11.4f} │    {results['Q_lighting']:>13.4f} │   {results['P_lighting']:>13.4f}
+Induction Motor   │  {results['P_motor_input']:>11.4f} │    {results['Q_motor']:>13.4f} │   {results['S_motor']:>13.4f}
+Rotary Converter  │  {results['P_converter_input']:>11.4f} │    {results['Q_converter']:>13.4f} │   {results['S_converter']:>13.4f}
+──────────────────┼──────────────┼───────────────────┼─────────────────
+TOTAL STATION     │  {results['P_total']:>11.4f} │    {results['Q_total']:>13.4f} │   {results['P_total']:>13.4f}
+
+Station PF = {results['P_total']:.4f} / {results['P_total']:.4f} = 1.0000 ✓
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+            self.gen_pf_result.delete(1.0, tk.END)
+            self.gen_pf_result.insert(1.0, result_text)
+
+            # Plot power triangles
+            self.plot_generator_pf_diagrams(results)
+
+            self.update_status("Generator power factor calculation completed successfully")
+
+        except Exception as e:
+            messagebox.showerror("Calculation Error", f"Error during calculation:\n{str(e)}")
+
+    def plot_generator_pf_diagrams(self, results):
+        """Plot power triangle diagrams for all loads"""
+        self.gen_pf_fig.clear()
+
+        # Create four subplots
+        ax1 = self.gen_pf_fig.add_subplot(141)
+        ax2 = self.gen_pf_fig.add_subplot(142)
+        ax3 = self.gen_pf_fig.add_subplot(143)
+        ax4 = self.gen_pf_fig.add_subplot(144)
+
+        # 1. Lighting Load (unity PF)
+        P1 = results['P_lighting']
+        ax1.arrow(0, 0, P1, 0, head_width=3, head_length=3, fc='blue', ec='blue', linewidth=2)
+        ax1.plot([0], [0], 'go', markersize=8)
+        ax1.text(P1/2, -8, f'P = {P1:.1f} kW', ha='center', fontsize=9, fontweight='bold')
+        ax1.set_xlim([-10, P1+20])
+        ax1.set_ylim([-20, 20])
+        ax1.set_xlabel('Real Power P (kW)', fontsize=9)
+        ax1.set_ylabel('Reactive Power Q (kVAR)', fontsize=9)
+        ax1.set_title('Lighting Load\n(Unity PF)', fontsize=10, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        ax1.axhline(y=0, color='k', linewidth=0.5)
+        ax1.axvline(x=0, color='k', linewidth=0.5)
+
+        # 2. Induction Motor (lagging PF)
+        P2 = results['P_motor_input']
+        Q2 = results['Q_motor']
+        S2 = results['S_motor']
+
+        ax2.arrow(0, 0, P2, 0, head_width=10, head_length=10, fc='blue', ec='blue', linewidth=2)
+        ax2.arrow(P2, 0, 0, Q2, head_width=10, head_length=10, fc='red', ec='red', linewidth=2)
+        ax2.plot([0, P2], [0, Q2], 'g--', linewidth=2.5, label=f'S = {S2:.1f} kVA')
+        ax2.plot([0], [0], 'ko', markersize=8)
+
+        angle = math.degrees(math.atan2(Q2, P2))
+        ax2.text(P2/2, -20, f'P = {P2:.1f} kW', ha='center', fontsize=9, fontweight='bold', color='blue')
+        ax2.text(P2+15, Q2/2, f'Q = {Q2:.1f} kVAR', ha='left', fontsize=9, fontweight='bold', color='red')
+        ax2.text(P2/2-20, Q2/2+20, f'φ = {angle:.1f}°', ha='center', fontsize=9, style='italic')
+
+        ax2.set_xlim([-20, P2+50])
+        ax2.set_ylim([-40, Q2+50])
+        ax2.set_xlabel('Real Power P (kW)', fontsize=9)
+        ax2.set_ylabel('Reactive Power Q (kVAR)', fontsize=9)
+        ax2.set_title('Induction Motor\n(Lagging PF)', fontsize=10, fontweight='bold')
+        ax2.legend(fontsize=8)
+        ax2.grid(True, alpha=0.3)
+        ax2.axhline(y=0, color='k', linewidth=0.5)
+        ax2.axvline(x=0, color='k', linewidth=0.5)
+
+        # 3. Rotary Converter (leading PF)
+        P3 = results['P_converter_input']
+        Q3 = results['Q_converter']
+        S3 = results['S_converter']
+
+        ax3.arrow(0, 0, P3, 0, head_width=10, head_length=5, fc='blue', ec='blue', linewidth=2)
+        ax3.arrow(P3, 0, 0, Q3, head_width=10, head_length=5, fc='red', ec='red', linewidth=2)
+        ax3.plot([0, P3], [0, Q3], 'g--', linewidth=2.5, label=f'S = {S3:.1f} kVA')
+        ax3.plot([0], [0], 'ko', markersize=8)
+
+        angle3 = math.degrees(math.atan2(Q3, P3))
+        ax3.text(P3/2, 15, f'P = {P3:.1f} kW', ha='center', fontsize=9, fontweight='bold', color='blue')
+        ax3.text(P3+10, Q3/2, f'Q = {Q3:.1f} kVAR', ha='left', fontsize=9, fontweight='bold', color='red')
+        ax3.text(P3/2-10, Q3/2-20, f'φ = {abs(angle3):.1f}°', ha='center', fontsize=9, style='italic')
+
+        ax3.set_xlim([-10, P3+40])
+        ax3.set_ylim([Q3-50, 40])
+        ax3.set_xlabel('Real Power P (kW)', fontsize=9)
+        ax3.set_ylabel('Reactive Power Q (kVAR)', fontsize=9)
+        ax3.set_title(f'Rotary Converter\n(Leading PF = {results["pf_converter"]:.4f})',
+                     fontsize=10, fontweight='bold')
+        ax3.legend(fontsize=8)
+        ax3.grid(True, alpha=0.3)
+        ax3.axhline(y=0, color='k', linewidth=0.5)
+        ax3.axvline(x=0, color='k', linewidth=0.5)
+
+        # 4. Total Station (unity PF)
+        P_total = results['P_total']
+
+        ax4.arrow(0, 0, P_total, 0, head_width=15, head_length=15, fc='green', ec='green', linewidth=3)
+        ax4.plot([0], [0], 'ro', markersize=10)
+        ax4.text(P_total/2, -30, f'P_total = {P_total:.1f} kW', ha='center',
+                fontsize=10, fontweight='bold', color='green')
+        ax4.text(P_total/2, -50, 'Q_total = 0 kVAR', ha='center',
+                fontsize=10, fontweight='bold', color='green')
+        ax4.text(P_total/2, 50, '★ UNITY POWER FACTOR ★', ha='center',
+                fontsize=11, fontweight='bold', color='darkgreen',
+                bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
+
+        ax4.set_xlim([-20, P_total+50])
+        ax4.set_ylim([-80, 80])
+        ax4.set_xlabel('Real Power P (kW)', fontsize=9)
+        ax4.set_ylabel('Reactive Power Q (kVAR)', fontsize=9)
+        ax4.set_title('Total Station Load\n(Unity PF = 1.0)', fontsize=10, fontweight='bold')
+        ax4.grid(True, alpha=0.3)
+        ax4.axhline(y=0, color='k', linewidth=0.5)
+        ax4.axvline(x=0, color='k', linewidth=0.5)
+
+        self.gen_pf_fig.tight_layout()
+        self.gen_pf_canvas.draw()
 
     def create_tariff_tab(self):
         """Example 50.74 - Tariff Calculator"""
@@ -1162,6 +1595,10 @@ and educational purposes.
         # Only handle resize for the main window
         if event.widget == self:
             # Redraw all canvases to fit new size
+            try:
+                self.gen_pf_canvas.draw()
+            except:
+                pass
             try:
                 self.tariff_canvas.draw()
             except:
